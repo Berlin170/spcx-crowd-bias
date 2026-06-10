@@ -76,11 +76,11 @@ function CandleChart({ candles, ipo }) {
     const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr);
     const W = r.width, H = r.height;
     ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
-    const pad = { t: 14, r: 64, b: 24, l: 8 }, volH = 70;
+    const pad = { t: 16, r: 64, b: 22, l: 8 }, volH = Math.max(60, H * 0.16);
     const ch = H - pad.t - pad.b - volH;
     const disp = candles.slice(-160), n = disp.length;
     const vals = disp.flatMap(c => [c.h, c.l]).concat([ipo]);
-    const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1, pd = rng * 0.06;
+    const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1, pd = rng * 0.04;
     const toY = p => pad.t + ch - ((p - (mn - pd)) / (rng + 2 * pd)) * ch;
     const bw = Math.max(1.5, (W - pad.l - pad.r) / n - 1);
     const toX = i => pad.l + (i + 0.5) * ((W - pad.l - pad.r) / n);
