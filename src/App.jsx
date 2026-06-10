@@ -82,8 +82,10 @@ function CandleChart({ candles, ipo }) {
     const vals = disp.flatMap(c => [c.h, c.l]).concat([ipo]);
     const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1, pd = rng * 0.04;
     const toY = p => pad.t + ch - ((p - (mn - pd)) / (rng + 2 * pd)) * ch;
-    const bw = Math.max(1.5, (W - pad.l - pad.r) / n - 1);
-    const toX = i => pad.l + (i + 0.5) * ((W - pad.l - pad.r) / n);
+    const projW = (W - pad.l - pad.r) * 0.20; // reserve right 20% for convergence projection
+    const plotW = (W - pad.l - pad.r) - projW;
+    const bw = Math.max(1.5, plotW / n - 1);
+    const toX = i => pad.l + (i + 0.5) * (plotW / n);
     const maxV = Math.max(...disp.map(c => c.v), 1);
     ctx.strokeStyle = LINE; ctx.lineWidth = 0.5; ctx.fillStyle = MUTE; ctx.font = "10px monospace"; ctx.textAlign = "left";
     for (let i = 0; i <= 5; i++) { const y = pad.t + (ch / 5) * i; ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke(); ctx.fillText(fmt(mx + pd - (i / 5) * (rng + 2 * pd)), W - pad.r + 4, y + 3); }
@@ -97,6 +99,38 @@ function CandleChart({ candles, ipo }) {
     const iy = toY(ipo); ctx.strokeStyle = BLUE; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(pad.l, iy); ctx.lineTo(W - pad.r, iy); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = BLUE; ctx.font = "10px monospace"; ctx.fillText("IPO $" + ipo + " · Jun 12", pad.l + 4, iy - 5);
     const last = disp[disp.length - 1], ly = toY(last.c), lc = last.c >= last.o ? GREEN : RED;
+
+    // --- Convergence projection: dotted line from last close down to IPO at right edge ---
+    const lastX = toX(n - 1);
+    const projEndX = W - pad.r - 4;
+    const projEndY = toY(ipo);
+    ctx.save();
+    // shaded convergence zone
+    const grad = ctx.createLinearGradient(lastX, ly, projEndX, projEndY);
+    grad.addColorStop(0, "#f0b42922");
+    grad.addColorStop(1, "#f0b42900");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(lastX, ly);
+    ctx.lineTo(projEndX, projEndY);
+    ctx.lineTo(projEndX, ly);
+    ctx.closePath();
+    ctx.fill();
+    // dotted projection line
+    ctx.strokeStyle = "#f0b429"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(lastX, ly); ctx.lineTo(projEndX, projEndY); ctx.stroke();
+    ctx.setLineDash([]);
+    // endpoint dot at IPO target
+    ctx.fillStyle = "#f0b429"; ctx.beginPath(); ctx.arc(projEndX, projEndY, 3.5, 0, Math.PI * 2); ctx.fill();
+    // label
+    ctx.fillStyle = "#f0b429"; ctx.font = "bold 10px monospace"; ctx.textAlign = "right";
+    ctx.fillText("\u2192 $" + ipo + " by Jun 12", projEndX - 6, projEndY - 8);
+    const dropPct = ((last.c - ipo) / last.c * 100);
+    ctx.fillStyle = "#8b6914"; ctx.font = "9px monospace";
+    ctx.fillText("-" + dropPct.toFixed(1) + "% to converge", projEndX - 6, projEndY + 16);
+    ctx.restore();
+
+    // last price tag
     ctx.fillStyle = lc; ctx.fillRect(W - pad.r, ly - 9, pad.r, 18);
     ctx.fillStyle = "#fff"; ctx.font = "bold 10px monospace"; ctx.textAlign = "left"; ctx.fillText(fmt(last.c), W - pad.r + 4, ly + 4);
   }, [candles, ipo]);
