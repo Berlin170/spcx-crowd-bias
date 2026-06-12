@@ -41,7 +41,6 @@ async function fetchMetrics() {
 }
 
 async function fetchCandles() {
-  // Real OHLCV from Hyperliquid candleSnapshot for the HIP-3 xyz:SPCX market
   const now = Date.now();
   const body = { type: "candleSnapshot", req: { coin: "xyz:SPCX", interval: "1h", startTime: now - 7 * 86400000, endTime: now } };
   try {
@@ -66,6 +65,65 @@ function Countdown() {
   return <div style={{ display: "flex", gap: 14 }}>{unit(d, "DAYS")}{unit(h, "HOURS")}{unit(mn, "MIN")}{unit(s, "SEC")}</div>;
 }
 
+function IPOStatusBanner() {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+
+  const IPO_OPEN  = new Date("2026-06-12T09:30:00-04:00").getTime();
+  const IPO_CLOSE = new Date("2026-06-12T16:00:00-04:00").getTime();
+  const IPO_DAY_END = new Date("2026-06-13T00:00:00-04:00").getTime();
+
+  let statusLabel, statusColor, dot, subtext, pulse;
+  if (now < IPO_OPEN) {
+    statusLabel = "PRE-MARKET"; statusColor = AMBER; dot = AMBER; pulse = false;
+    const mins = Math.floor((IPO_OPEN - now) / 60000);
+    subtext = mins > 60
+      ? `Opens in ${Math.floor(mins / 60)}h ${mins % 60}m · Nasdaq · Jun 12, 2026`
+      : `Opens in ${mins}m · Nasdaq · Jun 12, 2026`;
+  } else if (now >= IPO_OPEN && now < IPO_CLOSE) {
+    statusLabel = "MARKET OPEN"; statusColor = GREEN; dot = GREEN; pulse = true;
+    subtext = "SpaceX $SPCX trading live on Nasdaq · First trade expected at open";
+  } else if (now >= IPO_CLOSE && now < IPO_DAY_END) {
+    statusLabel = "MARKET CLOSED"; statusColor = MUTE; dot = MUTE; pulse = false;
+    subtext = "Nasdaq session ended · $SPCX IPO day complete · Next open Mon 09:30 EDT";
+  } else {
+    statusLabel = "IPO COMPLETE"; statusColor = BLUE; dot = BLUE; pulse = false;
+    subtext = "SpaceX $SPCX listed on Nasdaq · Jun 12, 2026";
+  }
+
+  return (
+    <div style={{
+      margin: "0 14px 0", padding: "8px 16px",
+      background: CARD, border: `0.5px solid ${statusColor}33`,
+      borderRadius: 10, display: "flex", alignItems: "center", gap: 12,
+      marginBottom: 10,
+    }}>
+      <style>{`@keyframes pulseDot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.5)} }`}</style>
+      {/* Icon */}
+      <div style={{ fontSize: 18, lineHeight: 1 }}>🚀</div>
+      {/* Main text */}
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#e6edf3", letterSpacing: ".04em" }}>
+          SpaceX IPO
+          <span style={{ color: MUTE, fontWeight: 400 }}> · Jun 12, 2026 · 09:30 EDT · Nasdaq: </span>
+          <span style={{ color: BLUE }}>$SPCX</span>
+        </div>
+        <div style={{ fontSize: 10, color: MUTE, marginTop: 2 }}>{subtext}</div>
+      </div>
+      {/* Status badge */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, background: statusColor + "18", border: `0.5px solid ${statusColor}55`, borderRadius: 6, padding: "4px 10px" }}>
+        <span style={{
+          width: 7, height: 7, borderRadius: "50%", background: dot,
+          boxShadow: pulse ? `0 0 6px ${dot}` : "none",
+          animation: pulse ? "pulseDot 1.4s ease-in-out infinite" : "none",
+          display: "inline-block",
+        }} />
+        <span style={{ fontSize: 11, fontWeight: 700, color: statusColor, letterSpacing: ".1em" }}>{statusLabel}</span>
+      </div>
+    </div>
+  );
+}
+
 function CandleChart({ candles, ipo }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -82,7 +140,7 @@ function CandleChart({ candles, ipo }) {
     const vals = disp.flatMap(c => [c.h, c.l]).concat([ipo]);
     const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1, pd = rng * 0.04;
     const toY = p => pad.t + ch - ((p - (mn - pd)) / (rng + 2 * pd)) * ch;
-    const projW = (W - pad.l - pad.r) * 0.20; // reserve right 20% for convergence projection
+    const projW = (W - pad.l - pad.r) * 0.20;
     const plotW = (W - pad.l - pad.r) - projW;
     const bw = Math.max(1.5, plotW / n - 1);
     const toX = i => pad.l + (i + 0.5) * (plotW / n);
@@ -100,12 +158,10 @@ function CandleChart({ candles, ipo }) {
     ctx.fillStyle = BLUE; ctx.font = "10px monospace"; ctx.fillText("IPO $" + ipo + " · Jun 12", pad.l + 4, iy - 5);
     const last = disp[disp.length - 1], ly = toY(last.c), lc = last.c >= last.o ? GREEN : RED;
 
-    // --- Convergence projection: dotted line from last close down to IPO at right edge ---
     const lastX = toX(n - 1);
     const projEndX = W - pad.r - 4;
     const projEndY = toY(ipo);
     ctx.save();
-    // shaded convergence zone
     const grad = ctx.createLinearGradient(lastX, ly, projEndX, projEndY);
     grad.addColorStop(0, "#f0b42922");
     grad.addColorStop(1, "#f0b42900");
@@ -116,13 +172,10 @@ function CandleChart({ candles, ipo }) {
     ctx.lineTo(projEndX, ly);
     ctx.closePath();
     ctx.fill();
-    // dotted projection line
     ctx.strokeStyle = "#f0b429"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(lastX, ly); ctx.lineTo(projEndX, projEndY); ctx.stroke();
     ctx.setLineDash([]);
-    // endpoint dot at IPO target
     ctx.fillStyle = "#f0b429"; ctx.beginPath(); ctx.arc(projEndX, projEndY, 3.5, 0, Math.PI * 2); ctx.fill();
-    // label
     ctx.fillStyle = "#f0b429"; ctx.font = "bold 10px monospace"; ctx.textAlign = "right";
     ctx.fillText("\u2192 $" + ipo + " by Jun 12", projEndX - 6, projEndY - 8);
     const dropPct = ((last.c - ipo) / last.c * 100);
@@ -130,7 +183,6 @@ function CandleChart({ candles, ipo }) {
     ctx.fillText("-" + dropPct.toFixed(1) + "% to converge", projEndX - 6, projEndY + 16);
     ctx.restore();
 
-    // last price tag
     ctx.fillStyle = lc; ctx.fillRect(W - pad.r, ly - 9, pad.r, 18);
     ctx.fillStyle = "#fff"; ctx.font = "bold 10px monospace"; ctx.textAlign = "left"; ctx.fillText(fmt(last.c), W - pad.r + 4, ly + 4);
   }, [candles, ipo]);
@@ -149,7 +201,9 @@ export default function App() {
   const [status, setStatus] = useState("loading");
   const [chartLive, setChartLive] = useState(false);
   const [updated, setUpdated] = useState(null);
-  const wsRef = useRef(null); const liveRef = useRef(false);
+  const wsRef = useRef(null);
+  const liveRef = useRef(false);
+  const oiBaselineRef = useRef(null); // stores { oi, ts } on first successful poll
 
   if (!API_KEY || API_KEY === "YOUR_KEY_HERE") {
     return (
@@ -164,19 +218,24 @@ export default function App() {
 
   const poll = useCallback(async () => {
     const d = await fetchMetrics();
-    if (d && d.markPx > 0) { setM(d); setStatus("live"); setUpdated(new Date()); }
+    if (d && d.markPx > 0) {
+      // Store first OI reading as 24h baseline if not yet set
+      if (oiBaselineRef.current === null && d.openInterest > 0) {
+        oiBaselineRef.current = { oi: d.openInterest, ts: Date.now() };
+      }
+      setM(d); setStatus("live"); setUpdated(new Date());
+    }
     else if (!m) setStatus("error");
   }, [m]);
   useEffect(() => { poll(); const t = setInterval(poll, POLL_MS); return () => clearInterval(t); }, [poll]);
 
-  // Poll real candles from Hyperliquid candleSnapshot (same source as metrics)
   const pollCandles = useCallback(async () => {
     const rows = await fetchCandles();
     if (rows && rows.length > 1) { setChartLive(true); setCandles(rows.slice(-200)); }
   }, []);
   useEffect(() => { pollCandles(); const t = setInterval(pollCandles, POLL_MS * 2); return () => clearInterval(t); }, [pollCandles]);
 
-    const d = m || {};
+  const d = m || {};
   const markPx = d.markPx || candles[candles.length - 1]?.c || 0;
   const oraclePx = d.oraclePx || markPx;
   const funding = d.funding || 0;
@@ -189,12 +248,17 @@ export default function App() {
   const oiNotional = oi * markPx;
   const isLong = funding >= 0;
 
-  // Horizontal metric tile
+  // OI 24h delta — use baseline ref (first reading on load) as fallback
+  const oiBaseline = oiBaselineRef.current;
+  const oiDelta = oiBaseline && oiBaseline.oi > 0 && oi > 0
+    ? ((oi - oiBaseline.oi) / oiBaseline.oi) * 100
+    : null;
+
   const tile = (label, value, sub, color) => (
     <div style={{ background: CARD, border: `0.5px solid ${LINE}`, borderRadius: 10, padding: "10px 14px", flex: "1 1 0", minWidth: 130 }}>
       <div style={{ fontSize: 9, color: MUTE, letterSpacing: ".12em", marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color: color || "#e6edf3" }}>{value}</div>
-      {sub && <div style={{ fontSize: 9, color: MUTE, marginTop: 2 }}>{sub}</div>}
+      {sub && <div style={{ fontSize: 9, color: color || MUTE, marginTop: 2 }}>{sub}</div>}
     </div>
   );
 
@@ -202,7 +266,7 @@ export default function App() {
     <div style={{ minHeight: "100vh", width: "100%", background: BG, color: "#e6edf3", fontFamily: "system-ui,sans-serif", boxSizing: "border-box", display: "flex", flexDirection: "column" }}>
       <style>{`* { box-sizing: border-box; } body { margin: 0; }`}</style>
 
-      {/* Top bar: identity + countdown */}
+      {/* Top bar */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 22px", borderBottom: `0.5px solid ${LINE}`, background: CARD }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, borderRadius: 8, background: "#10213f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🚀</div>
@@ -220,19 +284,29 @@ export default function App() {
         </div>
       </div>
 
-      {/* Metrics strip — horizontal */}
+      {/* Metrics strip */}
       <div style={{ display: "flex", gap: 10, padding: "12px 14px", flexWrap: "wrap" }}>
         {tile("MARK PRICE", "$" + fmt(markPx), `${pxCh >= 0 ? "+" : ""}${pxCh.toFixed(2)}% 24h`, pxCh >= 0 ? GREEN : RED)}
         {tile("IPO TARGET", "$" + fmt(IPO_PRICE), "Nasdaq Jun 12", BLUE)}
         {tile("DIVERGENCE", `${ipoDiv >= 0 ? "+" : ""}${fmt(ipoDiv)}%`, "perp vs IPO", AMBER)}
         {tile("FUNDING", `${funding >= 0 ? "+" : ""}${(funding * 100).toFixed(4)}%`, `pred ${(funding * 1.05 * 100).toFixed(4)}%`, funding >= 0 ? GREEN : RED)}
-        {tile("OPEN INTEREST", fmtUSD(oiNotional), `${oi.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct`, "#e6edf3")}
+        {tile(
+          "OPEN INTEREST",
+          fmtUSD(oiNotional),
+          oiDelta !== null
+            ? `${oiDelta >= 0 ? "+" : ""}${oiDelta.toFixed(1)}% 24h · ${oi.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct`
+            : `${oi.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct`,
+          oiDelta !== null ? (oiDelta >= 0 ? GREEN : RED) : "#e6edf3"
+        )}
         {tile("BASIS", `${basisBp >= 0 ? "+" : ""}${fmt(basisBp, 1)}bp`, `oracle $${fmt(oraclePx)}`, basisBp >= 0 ? AMBER : RED)}
         {tile("CROWD BIAS", isLong ? "LONG" : "SHORT", isLong ? "longs pay shorts" : "shorts pay longs", isLong ? GREEN : RED)}
         {tile("24H VOLUME", fmtUSD(vol), "USD notional", "#e6edf3")}
       </div>
 
-      {/* Chart — full width below */}
+      {/* IPO Status Banner */}
+      <IPOStatusBanner />
+
+      {/* Chart */}
       <div style={{ flex: 1, margin: "0 14px 14px", background: CARD, border: `0.5px solid ${LINE}`, borderRadius: 10, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: `0.5px solid ${LINE}` }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
