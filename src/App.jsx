@@ -1,331 +1,602 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const API_KEY = import.meta.env.VITE_GOLDRUSH_API_KEY;
+const GOLDRUSH_API_KEY = import.meta.env.VITE_GOLDRUSH_API_KEY;
+const GOLDRUSH_CHAINS_URL = "https://api.covalenthq.com/v1/chains/";
 const IPO_PRICE = 135;
-const IPO_DATE = new Date("2026-06-12T09:30:00-04:00");
+const IPO_OPEN = new Date("2026-06-12T09:30:00-04:00").getTime();
 const POLL_MS = 5000;
 const HL_INFO = "https://api.hyperliquid.xyz/info";
-const WS_URL = "wss://streaming.goldrushdata.com/graphql";
-const TOKEN = "xyz:SPCX";
+const COIN = "xyz:SPCX";
 
-const GREEN = "#22c55e", RED = "#ef4444", MUTE = "#5b6b7e", BLUE = "#5b9dff", AMBER = "#f0b429", BG = "#070b12", CARD = "#0d1420", LINE = "#1a2433";
+const GREEN = "#22c55e";
+const RED = "#ef4444";
+const MUTE = "#8091a7";
+const BLUE = "#5b9dff";
+const AMBER = "#f0b429";
+const BG = "#070b12";
+const CARD = "#0d1420";
+const PANEL = "#0a101a";
+const LINE = "#1a2433";
+const TEXT = "#e6edf3";
 
-const fmt = (n, d = 2) => typeof n === "number" && isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "--";
-const fmtUSD = n => {
-  if (!n || !isFinite(n)) return "--";
-  return n >= 1e9 ? "$" + (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? "$" + (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? "$" + (n / 1e3).toFixed(1) + "K" : "$" + n.toFixed(2);
+const fmt = (n, d = 2) =>
+  typeof n === "number" && Number.isFinite(n)
+    ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d })
+    : "--";
+
+const fmtUSD = (n) => {
+  if (!n || !Number.isFinite(n)) return "--";
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
+  return `$${n.toFixed(2)}`;
 };
 
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+async function fetchGoldRushStatus() {
+  if (!GOLDRUSH_API_KEY) {
+    return { ok: false, message: "Add VITE_GOLDRUSH_API_KEY to .env", chains: 0 };
+  }
+
+  try {
+    const res = await fetch(`${GOLDRUSH_CHAINS_URL}?key=${GOLDRUSH_API_KEY}`);
+    if (!res.ok) return { ok: false, message: `GoldRush API error ${res.status}`, chains: 0 };
+
+    const json = await res.json();
+    return {
+      ok: true,
+      message: "GoldRush API connected",
+      chains: json?.data?.items?.length || 0,
+    };
+  } catch {
+    return { ok: false, message: "GoldRush API unreachable", chains: 0 };
+  }
+}
+
+async function postInfo(body) {
+  const res = await fetch(HL_INFO, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  return res.json();
+}
+
 async function fetchMetrics() {
-  const post = (body) => fetch(HL_INFO, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
   const attempts = [{ type: "metaAndAssetCtxs", dex: "xyz" }, { type: "metaAndAssetCtxs" }];
+
   for (const body of attempts) {
     try {
-      const data = await post(body);
+      const data = await postInfo(body);
       const [meta, ctxs] = Array.isArray(data) ? data : [data, []];
       const universe = meta?.universe || [];
-      for (let i = 0; i < universe.length; i++) {
-        const nm = (universe[i].name || "").toUpperCase();
-        if (nm === "SPCX" || nm.endsWith(":SPCX")) {
+
+      for (let i = 0; i < universe.length; i += 1) {
+        const name = String(universe[i]?.name || "").toUpperCase();
+
+        if (name === "SPCX" || name.endsWith(":SPCX")) {
           const c = ctxs[i] || {};
           return {
-            markPx: +(c.markPx || c.midPx || 0), oraclePx: +(c.oraclePx || c.markPx || 0),
-            funding: +(c.funding || 0), openInterest: +(c.openInterest || 0),
-            prevDayPx: +(c.prevDayPx || 0), dayNtlVlm: +(c.dayNtlVlm || 0),
+            markPx: Number(c.markPx || c.midPx || 0),
+            oraclePx: Number(c.oraclePx || c.markPx || 0),
+            funding: Number(c.funding || 0),
+            openInterest: Number(c.openInterest || 0),
+            prevDayPx: Number(c.prevDayPx || 0),
+            dayNtlVlm: Number(c.dayNtlVlm || 0),
           };
         }
       }
-    } catch {}
+    } catch {
+      // Try next shape.
+    }
   }
+
   return null;
 }
 
 async function fetchCandles() {
   const now = Date.now();
-  const body = { type: "candleSnapshot", req: { coin: "xyz:SPCX", interval: "1h", startTime: now - 7 * 86400000, endTime: now } };
+
   try {
-    const res = await fetch(HL_INFO, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const rows = await res.json();
-    if (!Array.isArray(rows) || !rows.length) return null;
-    return rows.map(r => ({ o: +r.o, h: +r.h, l: +r.l, c: +r.c, v: +(r.v || 0), ts: +r.t })).filter(c => c.c > 0);
-  } catch { return null; }
+    const rows = await postInfo({
+      type: "candleSnapshot",
+      req: {
+        coin: COIN,
+        interval: "1h",
+        startTime: now - 7 * 86400000,
+        endTime: now,
+      },
+    });
+
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    return rows
+      .map((r) => ({
+        o: Number(r.o),
+        h: Number(r.h),
+        l: Number(r.l),
+        c: Number(r.c),
+        v: Number(r.v || 0),
+        ts: Number(r.t),
+      }))
+      .filter((c) => c.c > 0);
+  } catch {
+    return null;
+  }
+}
+
+function seedCandles(n = 160) {
+  let price = 156;
+  const now = Date.now();
+  const rows = [];
+
+  for (let i = 0; i < n; i += 1) {
+    const move = (Math.random() - 0.5) * price * 0.012;
+    const open = price;
+    price = Math.max(120, price + move);
+
+    rows.push({
+      o: open,
+      h: Math.max(open, price) * 1.003,
+      l: Math.min(open, price) * 0.997,
+      c: price,
+      v: 1e6 + Math.random() * 4e6,
+      ts: now - (n - i) * 3600000,
+    });
+  }
+
+  return rows;
+}
+
+function buildMarketModel({ markPx, ipoDiv, funding, basisBp, pxCh, oiDelta, goldRushOk }) {
+  const convergenceScore = clamp(100 - Math.abs(ipoDiv) * 1.8 - Math.abs(basisBp) / 6, 0, 100);
+  const riskScore = clamp(Math.abs(ipoDiv) * 1.4 + Math.abs(funding * 10000) * 2 + Math.abs(basisBp) / 8, 0, 100);
+
+  let sentiment = "Neutral";
+  if (funding > 0.0002 && ipoDiv > 10) sentiment = "Crowded long";
+  else if (funding < -0.0002 && ipoDiv < -5) sentiment = "Crowded short";
+  else if (pxCh > 3 && ipoDiv > 0) sentiment = "Bullish";
+  else if (pxCh < -3) sentiment = "Bearish";
+
+  let narrative = "GoldRush analytics layer is monitoring market structure, divergence, funding, and open interest.";
+
+  if (!goldRushOk) {
+    narrative = "GoldRush API key is missing or offline. Add VITE_GOLDRUSH_API_KEY to enable the GoldRush analytics layer.";
+  } else if (ipoDiv > 20 && funding > 0) {
+    narrative = "GoldRush signal: perp pricing is far above IPO reference while longs are paying funding. Crowd positioning looks aggressive.";
+  } else if (Math.abs(ipoDiv) < 5 && Math.abs(basisBp) < 25) {
+    narrative = "GoldRush signal: SPCX is moving close to IPO alignment. Convergence conditions look healthier.";
+  } else if (pxCh < -5 && oiDelta !== null && oiDelta > 8) {
+    narrative = "GoldRush signal: price is falling while open interest rises. This can indicate new short pressure or trapped longs.";
+  } else if (pxCh > 5 && funding > 0) {
+    narrative = "GoldRush signal: momentum is positive, but positive funding means long exposure is paying for the move.";
+  }
+
+  const signal =
+    convergenceScore > 70
+      ? "CONVERGING"
+      : riskScore > 65
+        ? "ELEVATED RISK"
+        : funding > 0
+          ? "LONG BIAS"
+          : "SHORT BIAS";
+
+  const scenarios = [
+    { label: "BULL", price: IPO_PRICE * 1.25, note: "strong demand premium" },
+    { label: "BASE", price: IPO_PRICE, note: "IPO reference case" },
+    { label: "BEAR", price: IPO_PRICE * 0.82, note: "discount repricing" },
+  ].map((s) => ({
+    ...s,
+    move: markPx > 0 ? ((s.price - markPx) / markPx) * 100 : 0,
+  }));
+
+  return { convergenceScore, riskScore, sentiment, narrative, signal, scenarios };
 }
 
 function Countdown() {
   const [now, setNow] = useState(Date.now());
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
-  const diff = Math.max(0, IPO_DATE - now);
-  const d = Math.floor(diff / 86400000), h = Math.floor(diff / 3600000) % 24, mn = Math.floor(diff / 60000) % 60, s = Math.floor(diff / 1000) % 60;
-  const unit = (v, l) => (
-    <div style={{ textAlign: "center" }}>
-      <div style={{ fontSize: 24, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#e6edf3" }}>{String(v).padStart(2, "0")}</div>
-      <div style={{ fontSize: 8, color: MUTE, letterSpacing: ".1em" }}>{l}</div>
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const diff = Math.max(0, IPO_OPEN - now);
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor(diff / 3600000) % 24;
+  const mins = Math.floor(diff / 60000) % 60;
+  const secs = Math.floor(diff / 1000) % 60;
+
+  const unit = (value, label) => (
+    <div style={{ textAlign: "center", minWidth: 38 }}>
+      <div style={{ fontSize: 23, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+        {String(value).padStart(2, "0")}
+      </div>
+      <div style={{ fontSize: 8, color: MUTE, letterSpacing: ".12em" }}>{label}</div>
     </div>
   );
-  return <div style={{ display: "flex", gap: 14 }}>{unit(d, "DAYS")}{unit(h, "HOURS")}{unit(mn, "MIN")}{unit(s, "SEC")}</div>;
-}
-
-function IPOStatusBanner() {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
-
-  const IPO_OPEN  = new Date("2026-06-12T09:30:00-04:00").getTime();
-  const IPO_CLOSE = new Date("2026-06-12T16:00:00-04:00").getTime();
-  const IPO_DAY_END = new Date("2026-06-13T00:00:00-04:00").getTime();
-
-  let statusLabel, statusColor, dot, subtext, pulse;
-  if (now < IPO_OPEN) {
-    statusLabel = "PRE-MARKET"; statusColor = AMBER; dot = AMBER; pulse = false;
-    const mins = Math.floor((IPO_OPEN - now) / 60000);
-    subtext = mins > 60
-      ? `Opens in ${Math.floor(mins / 60)}h ${mins % 60}m · Nasdaq · Jun 12, 2026`
-      : `Opens in ${mins}m · Nasdaq · Jun 12, 2026`;
-  } else if (now >= IPO_OPEN && now < IPO_CLOSE) {
-    statusLabel = "MARKET OPEN"; statusColor = GREEN; dot = GREEN; pulse = true;
-    subtext = "SpaceX $SPCX trading live on Nasdaq · First trade expected at open";
-  } else if (now >= IPO_CLOSE && now < IPO_DAY_END) {
-    statusLabel = "MARKET CLOSED"; statusColor = MUTE; dot = MUTE; pulse = false;
-    subtext = "Nasdaq session ended · $SPCX IPO day complete · Next open Mon 09:30 EDT";
-  } else {
-    statusLabel = "IPO COMPLETE"; statusColor = BLUE; dot = BLUE; pulse = false;
-    subtext = "SpaceX $SPCX listed on Nasdaq · Jun 12, 2026";
-  }
 
   return (
-    <div style={{
-      margin: "0 14px 0", padding: "8px 16px",
-      background: CARD, border: `0.5px solid ${statusColor}33`,
-      borderRadius: 10, display: "flex", alignItems: "center", gap: 12,
-      marginBottom: 10,
-    }}>
-      <style>{`@keyframes pulseDot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.5)} }`}</style>
-      {/* Icon */}
-      <div style={{ fontSize: 18, lineHeight: 1 }}>🚀</div>
-      {/* Main text */}
+    <div style={{ display: "flex", gap: 12 }}>
+      {unit(days, "DAYS")}
+      {unit(hours, "HRS")}
+      {unit(mins, "MIN")}
+      {unit(secs, "SEC")}
+    </div>
+  );
+}
+
+function MetricTile({ label, value, sub, color = TEXT }) {
+  return (
+    <div style={{ background: CARD, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 13px", flex: "1 1 135px", minWidth: 130 }}>
+      <div style={{ fontSize: 9, color: MUTE, letterSpacing: ".12em", marginBottom: 5 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800, color, whiteSpace: "nowrap" }}>{value}</div>
+      {sub ? <div style={{ fontSize: 9, color: color === TEXT ? MUTE : color, marginTop: 3 }}>{sub}</div> : null}
+    </div>
+  );
+}
+
+function Panel({ title, children }) {
+  return (
+    <div style={{ background: CARD, border: `1px solid ${LINE}`, borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ padding: "9px 12px", borderBottom: `1px solid ${LINE}`, fontSize: 10, color: MUTE, fontWeight: 800, letterSpacing: ".12em" }}>
+        {title}
+      </div>
+      <div style={{ padding: 12 }}>{children}</div>
+    </div>
+  );
+}
+
+function Gauge({ value, color, label }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE, marginBottom: 6 }}>
+        <span>{label}</span>
+        <span style={{ color, fontWeight: 800 }}>{value.toFixed(0)}/100</span>
+      </div>
+      <div style={{ height: 8, background: PANEL, borderRadius: 999, border: `1px solid ${LINE}`, overflow: "hidden" }}>
+        <div style={{ width: `${clamp(value, 0, 100)}%`, height: "100%", background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function IPOStatusBanner({ goldRush }) {
+  const color = goldRush.ok ? GREEN : AMBER;
+
+  return (
+    <div style={{ margin: "0 14px 10px", padding: "9px 16px", background: CARD, border: `1px solid ${color}33`, borderRadius: 8, display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ width: 34, height: 34, borderRadius: 8, background: "#10213f", display: "grid", placeItems: "center", color: BLUE, fontWeight: 900, fontSize: 11 }}>
+        GR
+      </div>
+
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#e6edf3", letterSpacing: ".04em" }}>
-          SpaceX IPO
-          <span style={{ color: MUTE, fontWeight: 400 }}> · Jun 12, 2026 · 09:30 EDT · Nasdaq: </span>
-          <span style={{ color: BLUE }}>$SPCX</span>
+        <div style={{ fontSize: 12, fontWeight: 800 }}>
+          GoldRush Powered SPCX IPO Dashboard <span style={{ color: MUTE, fontWeight: 400 }}>- Analytics, signals, risk, and convergence</span>
         </div>
-        <div style={{ fontSize: 10, color: MUTE, marginTop: 2 }}>{subtext}</div>
+        <div style={{ fontSize: 10, color: MUTE, marginTop: 2 }}>
+          {goldRush.ok ? `GoldRush API connected - ${goldRush.chains} indexed chains available` : goldRush.message}
+        </div>
       </div>
-      {/* Status badge */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, background: statusColor + "18", border: `0.5px solid ${statusColor}55`, borderRadius: 6, padding: "4px 10px" }}>
-        <span style={{
-          width: 7, height: 7, borderRadius: "50%", background: dot,
-          boxShadow: pulse ? `0 0 6px ${dot}` : "none",
-          animation: pulse ? "pulseDot 1.4s ease-in-out infinite" : "none",
-          display: "inline-block",
-        }} />
-        <span style={{ fontSize: 11, fontWeight: 700, color: statusColor, letterSpacing: ".1em" }}>{statusLabel}</span>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 7, background: `${color}18`, border: `1px solid ${color}55`, borderRadius: 6, padding: "5px 10px" }}>
+        <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, boxShadow: goldRush.ok ? `0 0 8px ${color}` : "none" }} />
+        <span style={{ fontSize: 11, fontWeight: 800, color, letterSpacing: ".1em" }}>
+          {goldRush.ok ? "GOLDRUSH LIVE" : "GOLDRUSH SETUP"}
+        </span>
       </div>
+    </div>
+  );
+}
+
+function InsightPanel({ model, funding, basisBp, oiDelta, goldRush }) {
+  const riskColor = model.riskScore > 65 ? RED : model.riskScore > 40 ? AMBER : GREEN;
+  const convColor = model.convergenceScore > 70 ? GREEN : model.convergenceScore > 40 ? AMBER : RED;
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <Panel title="GOLDRUSH AI COMMENTARY">
+        <div style={{ fontSize: 13, lineHeight: 1.45, color: TEXT }}>{model.narrative}</div>
+        <div style={{ marginTop: 10, display: "inline-flex", padding: "5px 8px", borderRadius: 6, background: `${convColor}18`, border: `1px solid ${convColor}55`, color: convColor, fontSize: 10, fontWeight: 900, letterSpacing: ".1em" }}>
+          {model.signal}
+        </div>
+      </Panel>
+
+      <Panel title="GOLDRUSH API STATUS">
+        <div style={{ display: "grid", gap: 7, fontSize: 11 }}>
+          <div>Status: <span style={{ color: goldRush.ok ? GREEN : RED, fontWeight: 800 }}>{goldRush.ok ? "CONNECTED" : "OFFLINE"}</span></div>
+          <div>Message: <span style={{ color: MUTE }}>{goldRush.message}</span></div>
+          <div>Indexed chains: <span style={{ color: BLUE, fontWeight: 800 }}>{goldRush.chains}</span></div>
+          <div>Dashboard role: <span style={{ color: TEXT, fontWeight: 800 }}>GoldRush analytics layer</span></div>
+        </div>
+      </Panel>
+
+      <Panel title="CONVERGENCE ENGINE">
+        <div style={{ display: "grid", gap: 12 }}>
+          <Gauge value={model.convergenceScore} color={convColor} label="IPO alignment" />
+          <Gauge value={model.riskScore} color={riskColor} label="Risk pressure" />
+          <div style={{ display: "grid", gap: 6, fontSize: 11, color: MUTE }}>
+            <div>Sentiment: <span style={{ color: TEXT, fontWeight: 800 }}>{model.sentiment}</span></div>
+            <div>Funding: <span style={{ color: funding >= 0 ? GREEN : RED }}>{(funding * 100).toFixed(4)}%</span></div>
+            <div>Basis: <span style={{ color: basisBp >= 0 ? AMBER : RED }}>{basisBp >= 0 ? "+" : ""}{fmt(basisBp, 1)}bp</span></div>
+            <div>OI change: <span style={{ color: oiDelta === null ? MUTE : oiDelta >= 0 ? GREEN : RED }}>{oiDelta === null ? "building baseline" : `${oiDelta >= 0 ? "+" : ""}${oiDelta.toFixed(1)}%`}</span></div>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="BULL / BASE / BEAR">
+        <div style={{ display: "grid", gap: 8 }}>
+          {model.scenarios.map((s) => (
+            <div key={s.label} style={{ display: "grid", gridTemplateColumns: "48px 1fr auto", gap: 8, alignItems: "center", fontSize: 11 }}>
+              <span style={{ color: s.label === "BULL" ? GREEN : s.label === "BEAR" ? RED : BLUE, fontWeight: 900 }}>{s.label}</span>
+              <span style={{ color: MUTE }}>{s.note}</span>
+              <span style={{ color: s.move >= 0 ? GREEN : RED, fontWeight: 800 }}>
+                ${fmt(s.price)} / {s.move >= 0 ? "+" : ""}{s.move.toFixed(1)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </Panel>
     </div>
   );
 }
 
 function CandleChart({ candles, ipo }) {
   const ref = useRef(null);
+
   useEffect(() => {
-    const cv = ref.current; if (!cv || candles.length < 2) return;
+    const canvas = ref.current;
+    if (!canvas || candles.length < 2) return;
+
     const dpr = window.devicePixelRatio || 1;
-    const r = cv.getBoundingClientRect(); if (r.width < 10) return;
-    cv.width = r.width * dpr; cv.height = r.height * dpr;
-    const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr);
-    const W = r.width, H = r.height;
-    ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
-    const pad = { t: 16, r: 64, b: 22, l: 8 }, volH = Math.max(60, H * 0.16);
-    const ch = H - pad.t - pad.b - volH;
-    const disp = candles.slice(-160), n = disp.length;
-    const vals = disp.flatMap(c => [c.h, c.l]).concat([ipo]);
-    const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1, pd = rng * 0.04;
-    const toY = p => pad.t + ch - ((p - (mn - pd)) / (rng + 2 * pd)) * ch;
-    const projW = (W - pad.l - pad.r) * 0.20;
-    const plotW = (W - pad.l - pad.r) - projW;
-    const bw = Math.max(1.5, plotW / n - 1);
-    const toX = i => pad.l + (i + 0.5) * (plotW / n);
-    const maxV = Math.max(...disp.map(c => c.v), 1);
-    ctx.strokeStyle = LINE; ctx.lineWidth = 0.5; ctx.fillStyle = MUTE; ctx.font = "10px monospace"; ctx.textAlign = "left";
-    for (let i = 0; i <= 5; i++) { const y = pad.t + (ch / 5) * i; ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke(); ctx.fillText(fmt(mx + pd - (i / 5) * (rng + 2 * pd)), W - pad.r + 4, y + 3); }
-    disp.forEach((c, i) => { const x = toX(i), vh = (c.v / maxV) * volH; ctx.fillStyle = c.c >= c.o ? GREEN + "33" : RED + "33"; ctx.fillRect(x - bw / 2, H - pad.b - vh, bw, vh); });
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const W = rect.width;
+    const H = rect.height;
+    const pad = { t: 16, r: 66, b: 24, l: 10 };
+    const volH = Math.max(52, H * 0.16);
+    const chartH = H - pad.t - pad.b - volH;
+    const disp = candles.slice(-160);
+    const n = disp.length;
+
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, W, H);
+
+    const values = disp.flatMap((c) => [c.h, c.l]).concat([ipo]);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const extra = range * 0.05;
+
+    const toY = (p) => pad.t + chartH - ((p - (min - extra)) / (range + extra * 2)) * chartH;
+    const plotW = W - pad.l - pad.r;
+    const step = plotW / n;
+    const bodyW = Math.max(1.5, step - 1);
+    const toX = (i) => pad.l + (i + 0.5) * step;
+    const maxVol = Math.max(...disp.map((c) => c.v), 1);
+
+    ctx.strokeStyle = LINE;
+    ctx.lineWidth = 1;
+    ctx.fillStyle = MUTE;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "left";
+
+    for (let i = 0; i <= 5; i += 1) {
+      const y = pad.t + (chartH / 5) * i;
+      const price = max + extra - (i / 5) * (range + extra * 2);
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(W - pad.r, y);
+      ctx.stroke();
+      ctx.fillText(fmt(price), W - pad.r + 5, y + 3);
+    }
+
     disp.forEach((c, i) => {
-      const x = toX(i), col = c.c >= c.o ? GREEN : RED;
-      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, toY(c.h)); ctx.lineTo(x, toY(c.l)); ctx.stroke();
-      const bt = Math.min(toY(c.o), toY(c.c)), bh = Math.max(1, Math.abs(toY(c.c) - toY(c.o)));
-      ctx.fillStyle = col; ctx.fillRect(x - bw / 2, bt, bw, bh);
+      const x = toX(i);
+      const vh = (c.v / maxVol) * volH;
+      ctx.fillStyle = c.c >= c.o ? `${GREEN}33` : `${RED}33`;
+      ctx.fillRect(x - bodyW / 2, H - pad.b - vh, bodyW, vh);
     });
-    const iy = toY(ipo); ctx.strokeStyle = BLUE; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(pad.l, iy); ctx.lineTo(W - pad.r, iy); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = BLUE; ctx.font = "10px monospace"; ctx.fillText("IPO $" + ipo + " · Jun 12", pad.l + 4, iy - 5);
-    const last = disp[disp.length - 1], ly = toY(last.c), lc = last.c >= last.o ? GREEN : RED;
 
-    const lastX = toX(n - 1);
-    const projEndX = W - pad.r - 4;
-    const projEndY = toY(ipo);
-    ctx.save();
-    const grad = ctx.createLinearGradient(lastX, ly, projEndX, projEndY);
-    grad.addColorStop(0, "#f0b42922");
-    grad.addColorStop(1, "#f0b42900");
-    ctx.fillStyle = grad;
+    disp.forEach((c, i) => {
+      const x = toX(i);
+      const color = c.c >= c.o ? GREEN : RED;
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x, toY(c.h));
+      ctx.lineTo(x, toY(c.l));
+      ctx.stroke();
+
+      const top = Math.min(toY(c.o), toY(c.c));
+      const height = Math.max(1, Math.abs(toY(c.c) - toY(c.o)));
+      ctx.fillStyle = color;
+      ctx.fillRect(x - bodyW / 2, top, bodyW, height);
+    });
+
+    const ipoY = toY(ipo);
+    ctx.strokeStyle = BLUE;
+    ctx.setLineDash([5, 4]);
     ctx.beginPath();
-    ctx.moveTo(lastX, ly);
-    ctx.lineTo(projEndX, projEndY);
-    ctx.lineTo(projEndX, ly);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = "#f0b429"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.moveTo(lastX, ly); ctx.lineTo(projEndX, projEndY); ctx.stroke();
+    ctx.moveTo(pad.l, ipoY);
+    ctx.lineTo(W - pad.r, ipoY);
+    ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = "#f0b429"; ctx.beginPath(); ctx.arc(projEndX, projEndY, 3.5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#f0b429"; ctx.font = "bold 10px monospace"; ctx.textAlign = "right";
-    ctx.fillText("\u2192 $" + ipo + " by Jun 12", projEndX - 6, projEndY - 8);
-    const dropPct = ((last.c - ipo) / last.c * 100);
-    ctx.fillStyle = "#8b6914"; ctx.font = "9px monospace";
-    ctx.fillText("-" + dropPct.toFixed(1) + "% to converge", projEndX - 6, projEndY + 16);
-    ctx.restore();
 
-    ctx.fillStyle = lc; ctx.fillRect(W - pad.r, ly - 9, pad.r, 18);
-    ctx.fillStyle = "#fff"; ctx.font = "bold 10px monospace"; ctx.textAlign = "left"; ctx.fillText(fmt(last.c), W - pad.r + 4, ly + 4);
+    ctx.fillStyle = BLUE;
+    ctx.font = "10px monospace";
+    ctx.fillText(`IPO $${ipo} - Jun 12`, pad.l + 4, ipoY - 6);
+
+    const last = disp[disp.length - 1];
+    const lastY = toY(last.c);
+    const lastColor = last.c >= last.o ? GREEN : RED;
+
+    ctx.fillStyle = lastColor;
+    ctx.fillRect(W - pad.r, lastY - 9, pad.r, 18);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 10px monospace";
+    ctx.fillText(fmt(last.c), W - pad.r + 5, lastY + 4);
   }, [candles, ipo]);
+
   return <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />;
 }
 
-function seedCandles(n = 160) {
-  let p = 156; const now = Date.now(); const arr = [];
-  for (let i = 0; i < n; i++) { const d = (Math.random() - 0.5) * p * 0.012; const o = p; p = Math.max(140, p + d); arr.push({ o, h: Math.max(o, p) * 1.003, l: Math.min(o, p) * 0.997, c: p, v: 1e6 + Math.random() * 4e6, ts: now - (n - i) * 3600000 }); }
-  return arr;
-}
-
 export default function App() {
-  const [m, setM] = useState(null);
+  const [metrics, setMetrics] = useState(null);
   const [candles, setCandles] = useState(seedCandles);
   const [status, setStatus] = useState("loading");
   const [chartLive, setChartLive] = useState(false);
   const [updated, setUpdated] = useState(null);
-  const wsRef = useRef(null);
-  const liveRef = useRef(false);
-  const oiBaselineRef = useRef(null); // stores { oi, ts } on first successful poll
+  const [goldRush, setGoldRush] = useState({ ok: false, message: "Checking GoldRush API...", chains: 0 });
+  const oiBaselineRef = useRef(null);
 
-  if (!API_KEY || API_KEY === "YOUR_KEY_HERE") {
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: BG, color: "#e6edf3", fontFamily: "system-ui,sans-serif" }}>
-        <div style={{ textAlign: "center", maxWidth: 420, padding: 32, border: `0.5px solid ${LINE}`, borderRadius: 14, background: CARD }}>
-          <div style={{ fontSize: 40 }}>🔑</div><h1 style={{ fontSize: 18 }}>API key required</h1>
-          <p style={{ fontSize: 13, color: "#9db1ce" }}>Add <code style={{ color: BLUE }}>VITE_GOLDRUSH_API_KEY</code> to <code>.env</code>, then restart. Free key at goldrush.dev.</p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    fetchGoldRushStatus().then(setGoldRush);
+  }, []);
 
-  const poll = useCallback(async () => {
-    const d = await fetchMetrics();
-    if (d && d.markPx > 0) {
-      // Store first OI reading as 24h baseline if not yet set
-      if (oiBaselineRef.current === null && d.openInterest > 0) {
-        oiBaselineRef.current = { oi: d.openInterest, ts: Date.now() };
+  const pollMetrics = useCallback(async () => {
+    const data = await fetchMetrics();
+
+    if (data && data.markPx > 0) {
+      if (oiBaselineRef.current === null && data.openInterest > 0) {
+        oiBaselineRef.current = { oi: data.openInterest, ts: Date.now() };
       }
-      setM(d); setStatus("live"); setUpdated(new Date());
+
+      setMetrics(data);
+      setStatus("live");
+      setUpdated(new Date());
+    } else {
+      setStatus((prev) => (prev === "live" ? "stale" : "error"));
     }
-    else if (!m) setStatus("error");
-  }, [m]);
-  useEffect(() => { poll(); const t = setInterval(poll, POLL_MS); return () => clearInterval(t); }, [poll]);
+  }, []);
 
   const pollCandles = useCallback(async () => {
     const rows = await fetchCandles();
-    if (rows && rows.length > 1) { setChartLive(true); setCandles(rows.slice(-200)); }
-  }, []);
-  useEffect(() => { pollCandles(); const t = setInterval(pollCandles, POLL_MS * 2); return () => clearInterval(t); }, [pollCandles]);
 
-  const d = m || {};
-  const markPx = d.markPx || candles[candles.length - 1]?.c || 0;
-  const oraclePx = d.oraclePx || markPx;
-  const funding = d.funding || 0;
-  const oi = d.openInterest || 0;
-  const prevDayPx = d.prevDayPx || 0;
-  const vol = d.dayNtlVlm || 0;
+    if (rows && rows.length > 1) {
+      setChartLive(true);
+      setCandles(rows.slice(-200));
+    }
+  }, []);
+
+  useEffect(() => {
+    pollMetrics();
+    const t = setInterval(pollMetrics, POLL_MS);
+    return () => clearInterval(t);
+  }, [pollMetrics]);
+
+  useEffect(() => {
+    pollCandles();
+    const t = setInterval(pollCandles, POLL_MS * 2);
+    return () => clearInterval(t);
+  }, [pollCandles]);
+
+  const data = metrics || {};
+  const markPx = data.markPx || candles[candles.length - 1]?.c || 0;
+  const oraclePx = data.oraclePx || markPx;
+  const funding = data.funding || 0;
+  const openInterest = data.openInterest || 0;
+  const prevDayPx = data.prevDayPx || 0;
+  const volume = data.dayNtlVlm || 0;
+
   const basisBp = oraclePx > 0 ? ((markPx - oraclePx) / oraclePx) * 10000 : 0;
   const pxCh = prevDayPx > 0 ? ((markPx - prevDayPx) / prevDayPx) * 100 : 0;
-  const ipoDiv = ((markPx - IPO_PRICE) / IPO_PRICE) * 100;
-  const oiNotional = oi * markPx;
-  const isLong = funding >= 0;
+  const ipoDiv = markPx > 0 ? ((markPx - IPO_PRICE) / IPO_PRICE) * 100 : 0;
+  const oiNotional = openInterest * markPx;
 
-  // OI 24h delta — use baseline ref (first reading on load) as fallback
   const oiBaseline = oiBaselineRef.current;
-  const oiDelta = oiBaseline && oiBaseline.oi > 0 && oi > 0
-    ? ((oi - oiBaseline.oi) / oiBaseline.oi) * 100
-    : null;
+  const oiDelta =
+    oiBaseline && oiBaseline.oi > 0 && openInterest > 0
+      ? ((openInterest - oiBaseline.oi) / oiBaseline.oi) * 100
+      : null;
 
-  const tile = (label, value, sub, color) => (
-    <div style={{ background: CARD, border: `0.5px solid ${LINE}`, borderRadius: 10, padding: "10px 14px", flex: "1 1 0", minWidth: 130 }}>
-      <div style={{ fontSize: 9, color: MUTE, letterSpacing: ".12em", marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 700, color: color || "#e6edf3" }}>{value}</div>
-      {sub && <div style={{ fontSize: 9, color: color || MUTE, marginTop: 2 }}>{sub}</div>}
-    </div>
+  const model = useMemo(
+    () => buildMarketModel({ markPx, ipoDiv, funding, basisBp, pxCh, oiDelta, goldRushOk: goldRush.ok }),
+    [markPx, ipoDiv, funding, basisBp, pxCh, oiDelta, goldRush.ok]
   );
 
-  return (
-    <div style={{ minHeight: "100vh", width: "100%", background: BG, color: "#e6edf3", fontFamily: "system-ui,sans-serif", boxSizing: "border-box", display: "flex", flexDirection: "column" }}>
-      <style>{`* { box-sizing: border-box; } body { margin: 0; }`}</style>
+  const statusColor = status === "live" ? GREEN : status === "stale" ? AMBER : RED;
 
-      {/* Top bar */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 22px", borderBottom: `0.5px solid ${LINE}`, background: CARD }}>
+  return (
+    <div style={{ minHeight: "100vh", width: "100%", background: BG, color: TEXT, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "flex", flexDirection: "column" }}>
+      <style>{`*{box-sizing:border-box}body{margin:0;background:${BG}}`}</style>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20, padding: "12px 22px", borderBottom: `1px solid ${LINE}`, background: CARD }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 8, background: "#10213f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🚀</div>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: "#10213f", color: BLUE, display: "grid", placeItems: "center", fontWeight: 900, fontSize: 12 }}>
+            GR
+          </div>
           <div>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>$SPCX <span style={{ color: MUTE, fontWeight: 400 }}>Crowd Bias & Convergence</span></div>
-            <div style={{ fontSize: 10, color: MUTE }}>xyz:SPCX · HIP-3 · built by @BerlinBuilder · powered by GoldRush</div>
+            <div style={{ fontSize: 15, fontWeight: 900 }}>
+              GoldRush $SPCX <span style={{ color: MUTE, fontWeight: 500 }}>IPO Intelligence Terminal</span>
+            </div>
+            <div style={{ fontSize: 10, color: MUTE }}>
+              GoldRush API analytics layer - {COIN} market feed - risk, sentiment, convergence
+            </div>
           </div>
         </div>
+
         <div style={{ display: "flex", alignItems: "center", gap: 22 }}>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 10, color: BLUE, letterSpacing: ".15em", fontWeight: 600 }}>NASDAQ DEBUT</div>
-            <div style={{ fontSize: 10, color: MUTE }}>Jun 12, 2026 · 09:30 EDT</div>
+            <div style={{ fontSize: 10, color: BLUE, letterSpacing: ".15em", fontWeight: 800 }}>NASDAQ DEBUT</div>
+            <div style={{ fontSize: 10, color: MUTE }}>Jun 12, 2026 - 09:30 EDT</div>
           </div>
           <Countdown />
         </div>
       </div>
 
-      {/* Metrics strip */}
       <div style={{ display: "flex", gap: 10, padding: "12px 14px", flexWrap: "wrap" }}>
-        {tile("MARK PRICE", "$" + fmt(markPx), `${pxCh >= 0 ? "+" : ""}${pxCh.toFixed(2)}% 24h`, pxCh >= 0 ? GREEN : RED)}
-        {tile("IPO TARGET", "$" + fmt(IPO_PRICE), "Nasdaq Jun 12", BLUE)}
-        {tile("DIVERGENCE", `${ipoDiv >= 0 ? "+" : ""}${fmt(ipoDiv)}%`, "perp vs IPO", AMBER)}
-        {tile("FUNDING", `${funding >= 0 ? "+" : ""}${(funding * 100).toFixed(4)}%`, `pred ${(funding * 1.05 * 100).toFixed(4)}%`, funding >= 0 ? GREEN : RED)}
-        {tile(
-          "OPEN INTEREST",
-          fmtUSD(oiNotional),
-          oiDelta !== null
-            ? `${oiDelta >= 0 ? "+" : ""}${oiDelta.toFixed(1)}% 24h · ${oi.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct`
-            : `${oi.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct`,
-          oiDelta !== null ? (oiDelta >= 0 ? GREEN : RED) : "#e6edf3"
-        )}
-        {tile("BASIS", `${basisBp >= 0 ? "+" : ""}${fmt(basisBp, 1)}bp`, `oracle $${fmt(oraclePx)}`, basisBp >= 0 ? AMBER : RED)}
-        {tile("CROWD BIAS", isLong ? "LONG" : "SHORT", isLong ? "longs pay shorts" : "shorts pay longs", isLong ? GREEN : RED)}
-        {tile("24H VOLUME", fmtUSD(vol), "USD notional", "#e6edf3")}
+        <MetricTile label="GOLDRUSH API" value={goldRush.ok ? "CONNECTED" : "OFFLINE"} sub={goldRush.ok ? `${goldRush.chains} chains indexed` : goldRush.message} color={goldRush.ok ? GREEN : RED} />
+        <MetricTile label="MARK PRICE" value={`$${fmt(markPx)}`} sub={`${pxCh >= 0 ? "+" : ""}${pxCh.toFixed(2)}% 24h`} color={pxCh >= 0 ? GREEN : RED} />
+        <MetricTile label="IPO TARGET" value={`$${fmt(IPO_PRICE)}`} sub="Nasdaq reference" color={BLUE} />
+        <MetricTile label="DIVERGENCE" value={`${ipoDiv >= 0 ? "+" : ""}${fmt(ipoDiv)}%`} sub="perp vs IPO" color={Math.abs(ipoDiv) > 15 ? AMBER : GREEN} />
+        <MetricTile label="CONVERGENCE" value={`${model.convergenceScore.toFixed(0)}/100`} sub="GoldRush score" color={model.convergenceScore > 70 ? GREEN : model.convergenceScore > 40 ? AMBER : RED} />
+        <MetricTile label="FUNDING" value={`${funding >= 0 ? "+" : ""}${(funding * 100).toFixed(4)}%`} sub={funding >= 0 ? "longs pay shorts" : "shorts pay longs"} color={funding >= 0 ? GREEN : RED} />
+        <MetricTile label="OPEN INTEREST" value={fmtUSD(oiNotional)} sub={oiDelta === null ? `${openInterest.toLocaleString(undefined, { maximumFractionDigits: 0 })} ct` : `${oiDelta >= 0 ? "+" : ""}${oiDelta.toFixed(1)}% session`} color={oiDelta === null ? TEXT : oiDelta >= 0 ? GREEN : RED} />
+        <MetricTile label="24H VOLUME" value={fmtUSD(volume)} sub="USD notional" />
       </div>
 
-      {/* IPO Status Banner */}
-      <IPOStatusBanner />
+      <IPOStatusBanner goldRush={goldRush} />
 
-      {/* Chart */}
-      <div style={{ flex: 1, margin: "0 14px 14px", background: CARD, border: `0.5px solid ${LINE}`, borderRadius: 10, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: `0.5px solid ${LINE}` }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-            <span style={{ fontSize: 11, color: MUTE, letterSpacing: ".1em" }}>SPCX · HYPERCORE PERP</span>
-            <span style={{ fontSize: 22, fontWeight: 700, color: pxCh >= 0 ? GREEN : RED }}>${fmt(markPx)}</span>
-            <span style={{ fontSize: 12, color: pxCh >= 0 ? GREEN : RED }}>{pxCh >= 0 ? "▲" : "▼"} {Math.abs(pxCh).toFixed(2)}% 24h</span>
-            <span style={{ fontSize: 12, color: AMBER }}>· {ipoDiv >= 0 ? "+" : ""}{fmt(ipoDiv)}% vs IPO</span>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 360px", gap: 12, padding: "0 14px 14px", flex: 1, minHeight: 0 }}>
+        <div style={{ background: CARD, border: `1px solid ${LINE}`, borderRadius: 8, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 520 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "10px 16px", borderBottom: `1px solid ${LINE}` }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, color: MUTE, letterSpacing: ".1em" }}>GOLDRUSH MARKET PANEL - SPCX</span>
+              <span style={{ fontSize: 24, fontWeight: 900, color: pxCh >= 0 ? GREEN : RED }}>${fmt(markPx)}</span>
+              <span style={{ fontSize: 12, color: pxCh >= 0 ? GREEN : RED }}>{pxCh >= 0 ? "UP" : "DOWN"} {Math.abs(pxCh).toFixed(2)}% 24h</span>
+              <span style={{ fontSize: 12, color: AMBER }}>{ipoDiv >= 0 ? "+" : ""}{fmt(ipoDiv)}% vs IPO</span>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 10 }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor, boxShadow: status === "live" ? `0 0 7px ${statusColor}` : "none" }} />
+              <span style={{ color: statusColor, fontWeight: 800 }}>{status.toUpperCase()}</span>
+              <span style={{ color: MUTE }}>{updated ? `- ${updated.toLocaleTimeString()}` : ""}</span>
+            </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10 }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: status === "live" ? GREEN : AMBER, boxShadow: status === "live" ? `0 0 6px ${GREEN}` : "none" }} />
-            <span style={{ color: status === "live" ? GREEN : AMBER }}>{status === "live" ? "LIVE" : "CONNECTING"}</span>
-            <span style={{ color: MUTE }}>{updated ? "· " + updated.toLocaleTimeString() : ""}</span>
+
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <CandleChart candles={candles} ipo={IPO_PRICE} />
+          </div>
+
+          <div style={{ padding: "7px 16px", borderTop: `1px solid ${LINE}`, fontSize: 9, color: MUTE, display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <span>GoldRush analytics layer - {COIN}-USDC - {chartLive ? "live market candles" : "seeded fallback candles"}</span>
+            <span>Signal: {model.signal}</span>
           </div>
         </div>
-        <div style={{ flex: 1, minHeight: 0 }}><CandleChart candles={candles} ipo={IPO_PRICE} /></div>
-        <div style={{ padding: "6px 16px", borderTop: `0.5px solid ${LINE}`, fontSize: 9, color: MUTE, display: "flex", justifyContent: "space-between" }}>
-          <span>xyz:SPCX-USDC · HyperCore Mainnet · {chartLive ? "GoldRush live candles" : "loading…"} · needs to fall ${fmt(markPx - IPO_PRICE)} to converge</span>
-          <span>Powered by GoldRush HIP-3 streaming</span>
-        </div>
+
+        <InsightPanel model={model} funding={funding} basisBp={basisBp} oiDelta={oiDelta} goldRush={goldRush} />
       </div>
     </div>
   );
